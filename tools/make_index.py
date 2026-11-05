@@ -1,7 +1,8 @@
 """Build 515 Cap Rock's index.html from the 310 Meadowcrest page structure.
 Same sections, layout, motion and scroll code; Cap Rock palette, type and content."""
 import re, json
-src = open('/home/claude/310meadowcrest/index.html').read()
+import os
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'base-template.html')).read()   # Meadowcrest page as of 006b59b
 s = src
 
 def rep(a, b, count=1):
@@ -141,16 +142,19 @@ resub(r'<div class="loc-cols">.*?</div>\s*</div>\s*(<div class="call">)', '''<di
       \\1''')
 
 # ---------------------------------------------------------------- design direction: blank placeholders to fill later
-PH = ('<figure class="%s ph-fig"><div class="ph" role="img" aria-label="%s inspiration image placeholder">'
-      '<span>%s image</span></div><figcaption><span>%s</span><span>Inspiration</span></figcaption></figure>')
+ICON = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">'
+        '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.6"/></svg>')
+PH = '<figure class="%s ph-fig"><div class="ph">' + ICON + '%s inspiration<br>Image to come</div></figure>'   # same as 325 Overcreek
 resub(r'<div class="dd-grid">.*?</div>\s*</div>\s*</section>',
-      '<div class="dd-grid">\n        ' + PH % ('a', 'Exterior', 'Exterior', 'Exterior') + '\n        '
-      + PH % ('b', 'Kitchen', 'Kitchen', 'Kitchen') + '\n      </div>\n    </div>\n  </section>')
-rep('    /* call link */', '''    .dd-grid .ph-fig{background:var(--paper)}
-    .ph-fig .ph{position:absolute;inset:clamp(10px,1.2vw,16px);border:1px dashed var(--rule);display:flex;align-items:center;justify-content:center}
-    .ph-fig .ph span{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted)}
-    .ph-fig figcaption{color:var(--muted);background:none}
-    .dd-grid .b.ph-fig{min-height:clamp(320px,34vw,520px)}
+      '<div class="dd-grid">\n        ' + PH % ('a', 'Exterior') + '\n        '
+      + PH % ('b', 'Interior') + '\n      </div>\n    </div>\n  </section>')
+rep('<h2 class="h2" id="dd-title">Exterior and kitchen inspiration.</h2>', '<h2 class="h2" id="dd-title">Exterior and interior inspiration.</h2>')
+rep('<p>Early reference images for the look of the home. Final materials and finishes have not been selected.</p>',
+    '<p>Reference images for the look of the home will appear here. Final materials and finishes have not been selected.</p>')
+rep('    /* call link */', '''    .dd-grid .ph-fig{background:var(--paper);border:1px dashed #c4a39b;display:grid;place-items:center;overflow:visible}
+    .dd-grid .b.ph-fig{min-height:100%}
+    .ph-fig .ph{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.18em;text-transform:uppercase;line-height:2}
+    .ph-fig .ph svg{display:block;width:28px;height:28px;margin:0 auto 12px;color:#b3918b}
     /* call link */''')
 
 # ---------------------------------------------------------------- order: claret residence band first, then the front elevation
