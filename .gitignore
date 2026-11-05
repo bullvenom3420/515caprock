@@ -1,0 +1,7 @@
+preview.html
+assets/pets-meta/
+__pycache__/
+*.pyc
+tools/pets/*_v.png
+tools/pets/pose_check.png
+tools/pets/both.png
