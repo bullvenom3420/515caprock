@@ -323,7 +323,14 @@ rep('<span><span class="hint-mouse">Drag to rotate</span><span class="hint-touch
 # slower spin: a longer scroll story
 rep('    .story{height:270vh}', '    .story{height:420vh}')
 # phone intro: slower (the video is longer now) and a quiet close button
-rep('setTimeout(finish,8000);', 'setTimeout(finish,11500);')
+rep('setTimeout(finish,8000);', 'setTimeout(finish,16000);')
+# phone intro: start only once the whole clip is buffered (no mid-spin stalls); the poster is the exact first frame
+rep("    v.play().catch(()=>setTimeout(finish,600));   // autoplay blocked: show the still front view briefly",
+    """    let go=false; const play=()=>{ if(go||finished) return; go=true;
+      const p=v.play(); if(p&&p.catch) p.catch(()=>setTimeout(finish,600));   // autoplay blocked: show the still front view briefly
+    };
+    if(v.readyState>=4) play(); else { v.addEventListener('canplaythrough',play,{once:true}); setTimeout(()=>{ if(v.readyState>=3) play(); },3500); }
+    setTimeout(()=>{ if(!go) finish(); },6500);       // very slow connection: skip to the still front view""")
 rep('<div class="m-chip">Conceptual rendering</div>', '<button type="button" class="m-skip" id="mSkip" aria-label="Skip intro"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>\n  <div class="m-chip">Conceptual rendering</div>')
 rep("    sec.addEventListener('click',()=>{ if(performance.now()-t0>1500){ finish(); exit(); } });",
     "    sec.addEventListener('click',()=>{ if(performance.now()-t0>1500){ finish(); exit(); } });\n    document.getElementById('mSkip').addEventListener('click',e=>{ e.stopPropagation(); finish(); exit(); });")

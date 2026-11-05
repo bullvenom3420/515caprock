@@ -701,8 +701,12 @@
     sec.addEventListener('click',()=>{ if(performance.now()-t0>1500){ finish(); exit(); } });
     document.getElementById('mSkip').addEventListener('click',e=>{ e.stopPropagation(); finish(); exit(); });   // tap to skip after a moment
     if(matchMedia('(prefers-reduced-motion: reduce)').matches){ finish(); return; }
-    v.play().catch(()=>setTimeout(finish,600));   // autoplay blocked: show the still front view briefly
-    setTimeout(finish,11500);                         // safety net
+    let go=false; const play=()=>{ if(go||finished) return; go=true;
+      const p=v.play(); if(p&&p.catch) p.catch(()=>setTimeout(finish,600));   // autoplay blocked: show the still front view briefly
+    };
+    if(v.readyState>=4) play(); else { v.addEventListener('canplaythrough',play,{once:true}); setTimeout(()=>{ if(v.readyState>=3) play(); },3500); }
+    setTimeout(()=>{ if(!go) finish(); },6500);       // very slow connection: skip to the still front view
+    setTimeout(finish,16000);                         // safety net
     const mh=document.getElementById('masthead');
     addEventListener('scroll',()=>mh.classList.toggle('scrolled',scrollY>8),{passive:true});
   })();
