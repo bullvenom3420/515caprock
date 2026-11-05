@@ -129,6 +129,13 @@ resub(r'<div class="loc-cols">.*?</div>\s*</div>\s*(<div class="call">)', '''<di
             <div><dt>City</dt><dd>Richardson, TX 75080</dd></div>
             <div><dt>County</dt><dd>Collin</dd></div>
           </dl>
+          <dl class="facts">
+            <div><dt>School district</dt><dd>?</dd></div>
+            <div><dt>Elementary</dt><dd>?</dd></div>
+            <div><dt>Junior high</dt><dd>?</dd></div>
+            <div><dt>High school</dt><dd>?</dd></div>
+          </dl>
+          <p class="note">School assignments can change. Confirm current zoning with the school district.</p>
         </div>
       </div>
       \\1''')
