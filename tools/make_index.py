@@ -287,6 +287,46 @@ PETS_JS = """    function show(i){ img.src=frames[i]; }
       return {hide,arm};
     })();"""
 rep("    function show(i){ img.src=frames[i]; }", PETS_JS)
+# ---------------------------------------------------------------- smooth intro: decode ahead, never stall on a frame
+rep("""    const cache=[]; let started=false;
+    function start(){ if(started) return; started=true;
+      frames.forEach((src,i)=>{const im=new Image(); im.decoding='async'; im.src=src; cache[i]=im;}); }
+    function show(i){ img.src=frames[i]; }""",
+"""    /* Frames load in spin order, six at a time, and each one is decoded off the main thread before it
+       is ever put on screen. If the frame the scroll asks for isn't ready yet, the nearest ready frame
+       stands in, so the page never freezes waiting for a decode (the old stutter at the start and end). */
+    const ready=new Uint8Array(N), cache=[]; let started=false, want=0;
+    function start(){ if(started) return; started=true; ready[0]=1;
+      let next=1, live=0;
+      const pump=()=>{ while(live<6 && next<N){ const i=next++; live++;
+          const im=new Image(); im.decoding='async'; im.src=frames[i]; cache[i]=im;
+          const p=im.decode?im.decode():new Promise((ok,no)=>{im.onload=ok;im.onerror=no;});
+          p.then(()=>{ ready[i]=1; live--; if(i===want) show(want); pump(); },()=>{ live--; pump(); }); } };
+      pump(); }
+    function nearest(i){ if(ready[i]) return i; for(let d=1;d<N/2;d++){ const a=(i-d+N)%N, b=(i+d)%N; if(ready[a]) return a; if(ready[b]) return b; } return 0; }
+    function show(i){ want=i; const k=nearest(i); if(img.dataset.f!==String(k)){ img.src=frames[k]; img.dataset.f=String(k); } }""")
+s = s.replace("if(!m || i!==shown || !(img.complete&&img.naturalWidth)) return;",
+              "if(!m || i!==shown || img.dataset.f!==String(i) || !(img.complete&&img.naturalWidth)) return;")
+rep('alt="Conceptual three-dimensional model of 515 Cap Rock Drive" decoding="sync">', 'alt="Conceptual three-dimensional model of 515 Cap Rock Drive" decoding="async" data-f="0">')
+# 3D model hints: rotate, and tap a spot to zoom into it
+rep('<p class="lede"><span class="hint-mouse">Drag sideways</span><span class="hint-touch">Swipe sideways</span> to walk around the house.</p>',
+    '<p class="lede"><span class="hint-mouse">Drag sideways</span><span class="hint-touch">Swipe sideways</span> to walk around the house. <span class="hint-mouse">Click</span><span class="hint-touch">Tap</span> any spot to zoom in on it.</p>')
+rep('<span><span class="hint-mouse">Drag to rotate</span><span class="hint-touch">Swipe to rotate</span></span>',
+    '<span><span class="hint-mouse">Drag to rotate · click to zoom</span><span class="hint-touch">Swipe to rotate · tap or pinch to zoom</span></span>')
+# slower spin: a longer scroll story
+rep('    .story{height:270vh}', '    .story{height:420vh}')
+# phone intro: slower (the video is longer now) and a quiet close button
+rep('setTimeout(finish,8000);', 'setTimeout(finish,11500);')
+rep('<div class="m-chip">Conceptual rendering</div>', '<button type="button" class="m-skip" id="mSkip" aria-label="Skip intro"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>\n  <div class="m-chip">Conceptual rendering</div>')
+rep("    sec.addEventListener('click',()=>{ if(performance.now()-t0>1500){ finish(); exit(); } });",
+    "    sec.addEventListener('click',()=>{ if(performance.now()-t0>1500){ finish(); exit(); } });\n    document.getElementById('mSkip').addEventListener('click',e=>{ e.stopPropagation(); finish(); exit(); });")
+rep('    /* call link */', '''    .m-skip{display:none}
+    @media(max-width:800px){
+      .m-skip{display:grid;place-items:center;position:absolute;top:calc(14px + env(safe-area-inset-top,0px));right:max(14px,env(safe-area-inset-right,0px));width:40px;height:40px;padding:0;border:1px solid rgba(245,239,232,.16);border-radius:50%;background:transparent;color:var(--night-muted);cursor:pointer;transition:color .2s,border-color .2s;-webkit-tap-highlight-color:transparent;z-index:2}
+      .m-skip svg{width:14px;height:14px}
+      .m-skip:active,.m-skip:focus-visible{color:var(--night-ink);border-color:rgba(245,239,232,.4);outline:none}
+    }
+    /* call link */''')
 rep("theme.content='#fbfaf8';", "theme.content='#ecd9d3';")
 rep('<!-- cat lying on the sill of the right-hand window -->', '<!-- cat sitting on the sill of the Bed 5 window -->')
 

@@ -18,7 +18,7 @@ def frame(i):
     al=np.where(shadowish,al*0.25,al)
     out=Image.fromarray(np.dstack([rgb,al*255]).astype(np.uint8),'RGBA')
     b=bgimg.copy(); b.alpha_composite(out); return b.convert('RGB')
-N=165
+N=240
 ease=lambda t: 0.5-0.5*math.cos(math.pi*t)
 for k in range(N):
     t=k/(N-1); idx=int(round(ease(t)*120))
