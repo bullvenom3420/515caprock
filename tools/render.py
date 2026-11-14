@@ -59,19 +59,48 @@ def triangulate(pts):
     return tris, nrm / (np.linalg.norm(nrm) + 1e-12)
 
 
-MATS = {'wall': 1.00, 'roof': 0.935, 'glass': 0.86, 'void': 0.55}
+MATS = {'floor': 0.90, 'wall': 1.00, 'roof': 0.935, 'glass': 0.86, 'darkglass': 0.56, 'void': 0.55, 'trim': 1.02}
 
-def build_mesh():
-    tri, fid, nrm, alb = [], [], [], []
-    for k, (pts, mat) in enumerate(house.geometry()):
+PET_KEYS = []
+SPRITES = {}
+
+def load_sprites():
+    here = os.path.dirname(__file__)
+    for k in ('dog', 'cat'):
+        if k not in SPRITES:
+            SPRITES[k] = np.asarray(Image.open(os.path.join(here, 'pets', k + '.png')).convert('RGBA'), float) / 255.0
+
+
+def build_mesh(pets=True):
+    tri, fid, nrm, alb, pid = [], [], [], [], []
+    geo = house.geometry()
+    for k, (pts, mat) in enumerate(geo):
         ts, n = triangulate(pts)
         for t in ts:
             tri.append([pts[t[0]], pts[t[1]], pts[t[2]]])
             fid.append(k + 1)
             nrm.append(n)
             alb.append(MATS[mat])
+            pid.append(0)
+    PET_KEYS.clear()
+    if pets:
+        load_sprites()
+        for key, q in house.PET_QUADS.items():
+            PET_KEYS.append(key)
+            o, U, V = np.array(q['o']), np.array(q['U']), np.array(q['V'])
+            c = [o, o + U, o + U + V, o + V]
+            for t in ((0, 1, 2), (0, 2, 3)):
+                tri.append([c[t[0]], c[t[1]], c[t[2]]])
+                fid.append(q['fid'])
+                nrm.append(np.array(q['n'], float))
+                alb.append(MATS[geo[q['fid'] - 1][1]])          # same shade as the glass it sits behind
+                pid.append(len(PET_KEYS))
     return (np.array(tri, float), np.array(fid, np.int32),
-            np.array(nrm, float), np.array(alb, float))
+            np.array(nrm, float), np.array(alb, float), np.array(pid, np.int32))
+
+
+LAST_PETS = {}
+PET_FADE = {}     # per-pet opacity (build animation fades them in at the end)
 
 
 # ------------------------------------------------------------------ raster
@@ -113,15 +142,6 @@ def raster(sx, sy, sd, W, H, ids, closer_is_larger=True):
 
 # ------------------------------------------------------------------ camera
 CENTER = np.array(house.CENTER, float)
-LAST_META = []
-LAST_PATCHES = []
-
-# pets that live behind window glass: (face index, anchor = bottom-centre in world ft,
-# height ft, sprite).  Faces are found by their tag in house.TAGS.
-house.build()
-_PD = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pets')
-PETS = [(house.TAGS[t], a, h, Image.open(os.path.join(_PD, s)).convert('RGBA'))
-        for t, a, h, s in house.PETS]
 
 def camera(theta_deg, elev_deg, dist):
     th = math.radians(theta_deg); el = math.radians(elev_deg)
@@ -134,8 +154,11 @@ def camera(theta_deg, elev_deg, dist):
 
 
 def render(theta, W=1600, H=1000, ss=2, elev=11.0, dist=172.0, fov=27.0,
-           mesh=None, line_rgb=(58, 57, 54), wall_rgb=(246, 244, 239)):
-    tri, fid, nrm, alb = mesh
+           mesh=None, line_rgb=(58, 57, 54), wall_rgb=(246, 244, 239), shadow_classes=None):
+    """shadow_classes: optional (class index per triangle, weight per class). A class with weight w
+    darkens other surfaces by w of its full shadow (pieces still in the air cast faint shadows that
+    firm up as they land); a surface is always fully shadowed by its own class."""
+    tri, fid, nrm, alb, pid = mesh
     Ws, Hs = W * ss, H * ss
     eye, f, r, u = camera(theta, elev, dist)
     foc = (Hs / 2) / math.tan(math.radians(fov) / 2)
@@ -173,19 +196,33 @@ def render(theta, W=1600, H=1000, ss=2, elev=11.0, dist=172.0, fov=27.0,
         q = p - CENTER
         return (SM / 2 + (q @ lr) / ext * SM / 2, SM / 2 - (q @ lu) / ext * SM / 2, q @ lf)
     lx, ly, ld = lproj(tri)
-    sdb, _ = raster(lx, ly, ld, SM, SM, np.arange(len(tri)), False)
+    if shadow_classes is None:
+        tcls, wts = np.zeros(len(tri), int), [1.0]
+    else:
+        tcls, wts = shadow_classes
+    maps = []
+    for c, w in enumerate(wts):
+        sel = np.where(tcls == c)[0]
+        if w <= 0 or not len(sel):
+            continue
+        sdb_c, _ = raster(lx[sel], ly[sel], ld[sel], SM, SM, np.arange(len(sel)), False)
+        maps.append((c, w, sdb_c))
 
-    def shadow_at(points, bias=0.25, soft=2):
+    def shadow_at(points, bias=0.25, soft=2, pcls=None):
         qx, qy, qd = lproj(points)
-        acc = np.zeros(qx.shape)
-        cnt = 0
-        for ox in range(-soft, soft + 1):
-            for oy in range(-soft, soft + 1):
-                ix = np.clip((qx + ox * 2.0).astype(int), 0, SM - 1)
-                iy = np.clip((qy + oy * 2.0).astype(int), 0, SM - 1)
-                acc += (qd - bias <= sdb[iy, ix])
-                cnt += 1
-        return acc / cnt
+        lit = np.ones(qx.shape)
+        for c, w, sdb_c in maps:
+            acc = np.zeros(qx.shape)
+            cnt = 0
+            for ox in range(-soft, soft + 1):
+                for oy in range(-soft, soft + 1):
+                    ix = np.clip((qx + ox * 2.0).astype(int), 0, SM - 1)
+                    iy = np.clip((qy + oy * 2.0).astype(int), 0, SM - 1)
+                    acc += (qd - bias <= sdb_c[iy, ix])
+                    cnt += 1
+            ww = w if pcls is None else np.where(pcls == c, 1.0, w)
+            lit *= 1 - ww * (1 - acc / cnt)
+        return lit
 
     # ---- shading
     N = nrm[np.where(hit, ib, 0)]
@@ -194,7 +231,7 @@ def render(theta, W=1600, H=1000, ss=2, elev=11.0, dist=172.0, fov=27.0,
     ndl = np.clip(N @ L, 0, None)
     sh = np.ones((Hs, Ws))
     hp = wpos[hit]
-    sh[hit] = shadow_at(hp, soft=3)
+    sh[hit] = shadow_at(hp, soft=3, pcls=tcls[ib[hit]])
     a = alb[np.where(hit, ib, 0)]
     amb = 0.70 + 0.10 * N[..., 2] + 0.06 * (N @ (-f))
     lum = a * (amb + 0.30 * ndl * (0.35 + 0.65 * sh))
@@ -202,49 +239,35 @@ def render(theta, W=1600, H=1000, ss=2, elev=11.0, dist=172.0, fov=27.0,
     base = np.array(wall_rgb, float) / 255.0
     col = np.clip(lum[..., None] * base[None, None] / 1.0, 0, 1)
 
-    # ---- pets: drawn INSIDE a window, clipped to that window's glass as seen
-    # from the camera, so they sit behind the pane and turn with the house.
-    global LAST_META, LAST_PATCHES
-    LAST_META, LAST_PATCHES = [], []
-    col_clean = col.copy()                                 # same shading without the pets
-    for face_idx, anchor, height, sprite in PETS:
-        fb = np.where(hit, fid[np.where(hit, ib, 0)], 0)
-        mask = fb == face_idx + 1
-        if not mask.any():
-            LAST_META.append(None)
+    # ---- pets: sprites on quads just inside the glass (occluded like any surface)
+    LAST_PETS.clear()
+    pix = np.where(hit, pid[np.where(hit, ib, 0)], 0)
+    for k, key in enumerate(PET_KEYS, start=1):
+        q = house.PET_QUADS[key]
+        o, U, V = np.array(q['o']), np.array(q['U']), np.array(q['V'])
+        m = pix == k
+        corners = np.array([o + V, o + U + V, o + U, o])       # TL, TR, BR, BL
+        rc = corners - eye
+        zc4 = rc @ f
+        scr = np.stack([cx + foc * (rc @ r) / zc4, cy - foc * (rc @ u) / zc4], 1) / ss
+        nvec = np.array(q['n'], float)
+        facing_cam = float(nvec @ (eye - (o + U / 2 + V / 2))) > 0
+        LAST_PETS[key] = dict(corners=scr.round(2).tolist(), visible=bool(m.sum() > 40 and facing_cam),
+                              frac=float(m.sum()) / max(1.0, abs((scr[1][0]-scr[0][0])*(scr[3][1]-scr[0][1])-(scr[1][1]-scr[0][1])*(scr[3][0]-scr[0][0])) * ss * ss))
+        if not m.any():
             continue
-        # glass outline and how squarely the pane faces the camera (for the live layer)
-        gp = np.array(house.faces[face_idx][0], float)
-        gq = gp - eye
-        gz = gq @ f
-        poly = [[round(float((cx + foc * (q @ r) / z) / ss), 1), round(float((cy - foc * (q @ u) / z) / ss), 1)]
-                for q, z in zip(gq, gz)]
-        gn = np.cross(gp[1] - gp[0], gp[2] - gp[0]); gn /= np.linalg.norm(gn) + 1e-12
-        gc = gp.mean(0); vd = (eye - gc) / np.linalg.norm(eye - gc)
-        facing = float(abs(gn @ vd))
-        q = np.asarray(anchor, float) - eye
-        zq = q @ f
-        if zq <= 1:
-            LAST_META.append(None); continue
-        ax, ay = cx + foc * (q @ r) / zq, cy - foc * (q @ u) / zq
-        hp_ = foc * height / zq
-        wp_ = hp_ * sprite.width / sprite.height
-        if hp_ < 4:
-            LAST_META.append(None); continue
-        spr = np.asarray(sprite.resize((max(1, int(round(wp_))), max(1, int(round(hp_)))), Image.LANCZOS), float) / 255.0
-        x0 = int(round(ax - wp_ / 2)); y0 = int(round(ay - hp_))
-        sh_, sw_ = spr.shape[:2]
-        X0, Y0 = max(0, x0), max(0, y0)
-        X1, Y1 = min(Ws, x0 + sw_), min(Hs, y0 + sh_)
-        if X1 <= X0 or Y1 <= Y0:
-            LAST_META.append(None); continue
-        LAST_META.append({'x': round((ax - wp_ / 2) / ss, 2), 'y': round((ay - hp_) / ss, 2),
-                          'w': round(wp_ / ss, 2), 'h': round(hp_ / ss, 2), 'clip': poly,
-                          'facing': round(facing, 3), 'px': int(mask.sum())})
-        sub = spr[Y0 - y0:Y1 - y0, X0 - x0:X1 - x0]
-        a_ = sub[..., 3:4] * mask[Y0:Y1, X0:X1, None]
-        inside = sub[..., :3] * 0.94                      # a touch dimmer: it's indoors, behind glass
-        col[Y0:Y1, X0:X1] = col[Y0:Y1, X0:X1] * (1 - a_) + inside * a_
+        sp = SPRITES[q['sprite']]
+        Hh, Ww = sp.shape[:2]
+        d = wpos[m] - o
+        uu = np.clip(d @ U / (U @ U), 0, 1)
+        vv = np.clip(1 - d @ V / (V @ V), 0, 1)
+        sx_ = np.clip((uu * (Ww - 1)).astype(int), 0, Ww - 1)
+        sy_ = np.clip((vv * (Hh - 1)).astype(int), 0, Hh - 1)
+        px_ = sp[sy_, sx_]
+        a_ = px_[:, 3:4] * PET_FADE.get(key, 1.0)
+        glass_tint = np.array([0.80, 0.81, 0.84])
+        prgb = px_[:, :3] * 0.94 + glass_tint * 0.06
+        col[m] = prgb * a_ + col[m] * (1 - a_)
 
     # ---- ground (transparent) : shadow + soft contact occlusion
     gt = np.where(ray[..., 2] < -1e-6, -eye[2] / np.minimum(ray[..., 2], -1e-6), 0)
@@ -283,36 +306,23 @@ def render(theta, W=1600, H=1000, ss=2, elev=11.0, dist=172.0, fov=27.0,
             s2 |= np.roll(np.roll(sil, dy, 0), dx, 1)
     lines = e2 | s2
 
-    # ---- compose RGBA (twice: with pets, and a clean copy for the live layer's backing patch)
+    # ---- compose RGBA
     lc = np.array(line_rgb, float) / 255.0
-    def finish(col):
-        rgb = np.where(hit[..., None], col, lc[None, None] * 0 + 0)
-        alpha = np.where(hit, 1.0, galpha)
-        shadow_rgb = np.array([0.24, 0.23, 0.21])
-        rgb = np.where(hit[..., None], rgb, shadow_rgb[None, None])
-        la_ = 0.88
-        rgb = np.where(lines[..., None], lc * la_ + rgb * (1 - la_) * hit[..., None] + lc * (1 - la_) * (~hit[..., None]), rgb)
-        alpha = np.where(lines, np.maximum(alpha, la_), alpha)
+    rgb = np.where(hit[..., None], col, lc[None, None] * 0 + 0)
+    alpha = np.where(hit, 1.0, galpha)
+    shadow_rgb = np.array([0.24, 0.23, 0.21])
+    rgb = np.where(hit[..., None], rgb, shadow_rgb[None, None])
+    la_ = 0.88
+    rgb = np.where(lines[..., None], lc * la_ + rgb * (1 - la_) * hit[..., None] + lc * (1 - la_) * (~hit[..., None]), rgb)
+    alpha = np.where(lines, np.maximum(alpha, la_), alpha)
 
-        img = np.dstack([rgb * alpha[..., None], alpha])           # premultiplied
-        im = Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8), 'RGBA')
-        im = im.resize((W, H), Image.LANCZOS)
-        arr = np.asarray(im).astype(float)
-        a8 = arr[..., 3:4] / 255.0
-        arr[..., :3] = np.where(a8 > 0, arr[..., :3] / np.maximum(a8, 1e-6), 0)
-        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), 'RGBA')
-    out = finish(col)
-    if any(LAST_META):
-        clean = finish(col_clean)
-        for m in LAST_META:
-            if not m:
-                LAST_PATCHES.append(None); continue
-            pad = 0.2 * m['h']
-            px0, py0 = max(0, int(m['x'] - pad)), max(0, int(m['y'] - pad))
-            px1, py1 = min(W, int(m['x'] + m['w'] + pad) + 1), min(H, int(m['y'] + m['h'] + 0.06 * m['h']) + 1)
-            m['patch'] = [px0, py0, px1 - px0, py1 - py0]
-            LAST_PATCHES.append(clean.crop((px0, py0, px1, py1)))
-    return out
+    img = np.dstack([rgb * alpha[..., None], alpha])           # premultiplied
+    im = Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8), 'RGBA')
+    im = im.resize((W, H), Image.LANCZOS)
+    arr = np.asarray(im).astype(float)
+    a8 = arr[..., 3:4] / 255.0
+    arr[..., :3] = np.where(a8 > 0, arr[..., :3] / np.maximum(a8, 1e-6), 0)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), 'RGBA')
 
 
 if __name__ == '__main__':

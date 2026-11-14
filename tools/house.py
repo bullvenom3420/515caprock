@@ -32,12 +32,24 @@ S8, S4 = 8 / 12, 4 / 12
 
 faces = []
 TAGS = {}
+FACE_GROUP = []          # build-animation piece of each face (parallel to faces)
+GROUP = ['ff']
+PET_QUADS = {}
+INTERIOR = [False]       # True: floors are hollow shells with rooms and doorways (build animation, viewer floors)
+FF = 0.0                 # first finished floor
+F2 = P1 + 1.0            # second finished floor
+WALL_T, PART_T = 0.8, 0.42
+
+
+def setgroup(g):
+    GROUP[0] = g
 
 
 def face(pts, mat, tag=None):
     if tag:
         TAGS[tag] = len(faces)
     faces.append(([list(map(float, p)) for p in pts], mat))
+    FACE_GROUP.append(GROUP[0])
 
 
 # ---------------------------------------------------------------- primitives
@@ -124,6 +136,94 @@ def shutter(axis, at, u0, u1, z0, z1, out, t=0.14):
         prism_x(a, b, [(u0, z0), (u1, z0), (u1, z1), (u0, z1)])
 
 
+# ---------------------------------------------------------------- hollow shells (build animation / viewer floors)
+def box(x0, x1, y0, y1, z0, z1, mat='wall'):
+    prism_z(z0, z1, [(x0, y0), (x1, y0), (x1, y1), (x0, y1)], mat)
+
+
+def _area(poly):
+    return 0.5 * sum(poly[i][0] * poly[(i + 1) % len(poly)][1] - poly[(i + 1) % len(poly)][0] * poly[i][1] for i in range(len(poly)))
+
+
+def inset(poly, d):
+    ccw = _area(poly) > 0
+    n = len(poly); lines = []
+    for i in range(n):
+        (xa, ya), (xb, yb) = poly[i], poly[(i + 1) % n]
+        dx, dy = xb - xa, yb - ya; L = (dx * dx + dy * dy) ** 0.5
+        nx, ny = (-dy / L, dx / L) if ccw else (dy / L, -dx / L)
+        lines.append(((xa + nx * d, ya + ny * d), (dx / L, dy / L)))
+    out = []
+    for i in range(n):
+        (p1, d1), (p2, d2) = lines[i - 1], lines[i]
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / den
+        out.append((p1[0] + d1[0] * t, p1[1] + d1[1] * t))
+    return out
+
+
+def shell(z0, z1, poly, floor_z, bottom=False, t=None, floor=True):
+    """Exterior walls of thickness t around poly, open on top, with a floor."""
+    t = WALL_T if t is None else t
+    inner = inset(poly, t); n = len(poly)
+    for i in range(n):
+        (xa, ya), (xb, yb) = poly[i], poly[(i + 1) % n]
+        face([(xa, ya, z0), (xb, yb, z0), (xb, yb, z1), (xa, ya, z1)], 'wall')
+        (ia, ja), (ib, jb) = inner[i], inner[(i + 1) % n]
+        face([(ia, ja, floor_z), (ib, jb, floor_z), (ib, jb, z1), (ia, ja, z1)], 'wall')
+        face([(xa, ya, z1), (xb, yb, z1), (ib, jb, z1), (ia, ja, z1)], 'wall')
+        if bottom:
+            face([(xa, ya, z0), (xb, yb, z0), (ib, jb, z0), (ia, ja, z0)], 'wall')
+    if floor:
+        face([(x, y, floor_z) for x, y in inner], 'floor')
+    return inner
+
+
+def partitions(walls, inner, z0, z1, door_top, t=None):
+    """Interior walls ('h', y, x0, x1[, doors]) / ('v', x, y0, y1[, doors]); doors are (center, width).
+    Ends near an exterior wall or another partition snap to its face exactly, so nothing overlaps."""
+    t = PART_T if t is None else t
+    n = len(inner)
+    def stops(kind, at):
+        c = []
+        for i in range(n):
+            (xa, ya), (xb, yb) = inner[i], inner[(i + 1) % n]
+            if kind == 'h' and abs(xa - xb) < 1e-6 and min(ya, yb) <= at <= max(ya, yb):
+                c.append((xa, 0.0))
+            if kind == 'v' and abs(ya - yb) < 1e-6 and min(xa, xb) <= at <= max(xa, xb):
+                c.append((ya, 0.0))
+        for w2 in walls:
+            k2, at2, a2, b2 = w2[:4]
+            if k2 != kind and min(a2, b2) - 0.5 <= at <= max(a2, b2) + 0.5:
+                c.append((at2, t / 2))
+        return c
+    def snap(v, cands, lo_end):
+        best = None
+        for c, half in cands:
+            target = c + half if lo_end else c - half
+            if abs(target - v) < 1.6 + half and (best is None or abs(target - v) < abs(best - v)):
+                best = target
+        return v if best is None else best
+    def piece(kind, at, u0, u1, za, zb):
+        if u1 - u0 < 1e-3:
+            return
+        if kind == 'h':
+            box(u0, u1, at - t / 2, at + t / 2, za, zb)
+        else:
+            box(at - t / 2, at + t / 2, u0, u1, za, zb)
+    for w in walls:
+        kind, at, a, b = w[:4]
+        doors = sorted(w[4]) if len(w) > 4 else []
+        a, b = min(a, b), max(a, b)
+        cands = stops(kind, at)
+        a2, b2 = snap(a, cands, True), snap(b, cands, False)
+        u = a2
+        for c, wd in doors:
+            d0, d1 = max(c - wd / 2, a2), min(c + wd / 2, b2)
+            piece(kind, at, u, d0, z0, z1); piece(kind, at, d0, d1, door_top, z1); u = d1
+        piece(kind, at, u, b2, z0, z1)
+
+
 # ---------------------------------------------------------------- roof planes
 def f_front(x, y):                        # front block: 4:12 kick to y=6, then 8:12
     return EF + (y + 3) * S4 if y <= 6 else EF + 3 + (y - 6) * S8
@@ -145,31 +245,89 @@ SMALL_RIDGE = rear(0, 29.59)
 def build():
     faces.clear()
     TAGS.clear()
+    FACE_GROUP.clear()
+    PET_QUADS.clear()
+    setgroup('ff')
 
     # ============ WALLS ============
-    # two-story mass, first floor to the 20'-7" plate (porch recess cut out)
-    two_story = [(0, 9), (8.33, 9), (8.33, 0), (49.33, 0), (49.33, 9), (56.67, 9),
-                 (56.67, 19.5), (59, 19.5), (59, 39.83), (39.5, 39.83), (39.5, 36.67),
-                 (22, 36.67), (22, 39.83), (0, 39.83)]
-    prism_z(0, P2, two_story)
-    # front block rises to the 21'-7" plate
-    prism_z(P2, P2F, [(8.33, 0), (49.33, 0), (49.33, 9), (8.33, 9)])
-    # second floor over the outdoor living porch, Bed #5 projecting to the rear
-    prism_z(P1, P2, [(22, 36.67), (39.5, 36.67), (39.5, 39.83), (39.67, 39.83),
-                     (39.67, 50.67), (23.83, 50.67), (23.83, 39.83), (22, 39.83)])
-    prism_z(P2, P2F, [(23.83, 39.83), (39.67, 39.83), (39.67, 50.67), (23.83, 50.67)])
-    # one-story garage / mud wing
-    prism_z(0, P1, [(0, 39.83), (22, 39.83), (22, 67.33), (0, 67.33)])
-    # one-story primary suite and hall
-    prism_z(0, P1, [(39.5, 39.83), (59, 39.83), (59, 33.83), (61.5, 33.83), (61.5, 56.17),
-                    (45.5, 56.17), (45.5, 49.17), (39.5, 49.17)])
+    if INTERIOR[0]:
+        # first floor: one shell around the two-story house, garage wing and primary suite
+        ff = [(0, 9), (8.33, 9), (8.33, 0), (49.33, 0), (49.33, 9), (56.67, 9), (56.67, 19.5), (59, 19.5),
+              (59, 33.83), (61.5, 33.83), (61.5, 56.17), (45.5, 56.17), (45.5, 49.17), (39.5, 49.17),
+              (39.5, 36.67), (22, 36.67), (22, 67.33), (0, 67.33)]
+        inner = shell(0, P1, ff, FF)
+        partitions([                                       # traced from the first floor plan; (center, width) doors
+            ('h', 40.9, 0, 22, [(12.5, 2.8)]),              # mud, laundry | garage
+            ('v', 8.75, 10.4, 36.9, [(17.9, 4.0)]),         # laundry, scullery | kitchen (cased opening)
+            ('h', 25.0, 0, 8.75),                           # laundry | scullery
+            ('h', 36.6, 8.75, 22, [(10.6, 2.6)]),           # kitchen | mud hall
+            ('h', 37.9, 0, 8.75, [(6.8, 2.6)]),             # laundry | mud hall
+            ('v', 24.25, 0, 15.9, [(8.4, 8.0)]),            # dining | foyer (8090 arched opening)
+            ('h', 15.9, 8.75, 24.25, [(16.5, 11.0)]),       # dining | kitchen (11490 arched opening)
+            ('v', 34.25, 0, 11.4, [(8.0, 4.6)]),            # foyer | study (French doors)
+            ('h', 11.4, 34.25, 49.33, [(36.0, 2.6)]),       # study | storage, closet
+            ('v', 47.25, 11.4, 36.15),                      # family, stair | primary bath and closet
+            ('h', 19.6, 47.25, 59, [(51.5, 2.8)]),          # primary bath | closet
+            ('h', 33.4, 47.25, 59, [(50.0, 2.8)]),          # primary bath | hall
+            ('v', 45.5, 39.83, 49.17),                      # primary bedroom | powder
+            ('h', 44.0, 39.5, 45.5, [(42.5, 2.5)]),         # powder | hall
+            ('h', 39.4, 45.5, 61.5, [(49.5, 2.8)]),         # primary bedroom | hall
+        ], inner, FF, P1, FF + 8.0)
+        setgroup('gceil')
+        box(0 + WALL_T, 22 - WALL_T, 40.9 + PART_T / 2, 67.33 - WALL_T, P1 - 0.25, P1)    # garage ceiling
+        setgroup('sf')
+        sf = [(0, 9), (8.33, 9), (8.33, 0), (49.33, 0), (49.33, 9), (56.67, 9), (56.67, 19.5), (59, 19.5),
+              (59, 39.83), (39.67, 39.83), (39.67, 50.67), (23.83, 50.67), (23.83, 39.83), (0, 39.83)]
+        inner = shell(P1, P2, sf, F2, bottom=True)
+        face([(x, y, P1) for x, y in inner], 'wall')       # underside of the second floor deck (porch ceiling)
+        partitions([                                       # traced from the second floor plan
+            ('v', 15.0, 25.75, 39.83, [(28.0, 2.6)]),       # Bed 2 | hall
+            ('h', 25.75, 0, 15.0, [(4.0, 2.5)]),            # Bed 2 | Bath 2
+            ('h', 30.0, 15.0, 24.5, [(17.5, 2.6)]),         # attic storage | hall
+            ('v', 24.5, 16.25, 39.83, [(27.5, 3.0)]),       # attic, hall | game room
+            ('h', 19.0, 0, 15.0, [(5.0, 2.5)]),             # Bath 2 | closet
+            ('v', 9.25, 13.75, 25.75, [(16.5, 2.5)]),       # closets | baths
+            ('h', 13.75, 9.25, 23.75, [(13.5, 2.6)]),       # baths | Bed 3
+            ('v', 23.75, 0, 13.75, [(3.0, 2.6)]),           # Bed 3 | stair landing
+            ('h', 16.25, 24.5, 45.0, [(29.5, 7.0), (39.0, 7.0)]),   # game room | stair (open, railed)
+            ('v', 45.0, 27.0, 39.83, [(33.0, 2.6)]),        # game room | Bed 4
+            ('h', 27.0, 45.0, 59, [(47.8, 2.8)]),           # Bed 4 | closet, bath
+            ('h', 32.65, 24.5, 45.0, [(27.5, 2.8)]),        # game room | Bath 5, closet
+            ('v', 30.0, 32.65, 38.75, [(35.7, 2.4)]),       # hall | Bath 5
+            ('h', 38.75, 30.0, 39.75, [(34.5, 2.4)]),       # Bath 5 | Bed 5
+            ('v', 39.75, 32.65, 39.83, [(36.0, 2.4)]),      # Bath 5 | closet
+        ], inner, F2, P2, F2 + 7.0)
+        # the front block and Bed #5 rise to the 21'-7" plate: wall rings, open over the rooms
+        for poly in ([(8.33, 0), (49.33, 0), (49.33, 9), (8.33, 9)],
+                     [(23.83, 39.83), (39.67, 39.83), (39.67, 50.67), (23.83, 50.67)]):
+            shell(P2, P2F, poly, P2, floor=False)
+        setgroup('ff')
+    else:
+        # two-story mass, first floor to the 20'-7" plate (porch recess cut out)
+        two_story = [(0, 9), (8.33, 9), (8.33, 0), (49.33, 0), (49.33, 9), (56.67, 9),
+                     (56.67, 19.5), (59, 19.5), (59, 39.83), (39.5, 39.83), (39.5, 36.67),
+                     (22, 36.67), (22, 39.83), (0, 39.83)]
+        prism_z(0, P2, two_story)
+        # front block rises to the 21'-7" plate
+        prism_z(P2, P2F, [(8.33, 0), (49.33, 0), (49.33, 9), (8.33, 9)])
+        # second floor over the outdoor living porch, Bed #5 projecting to the rear
+        prism_z(P1, P2, [(22, 36.67), (39.5, 36.67), (39.5, 39.83), (39.67, 39.83),
+                         (39.67, 50.67), (23.83, 50.67), (23.83, 39.83), (22, 39.83)])
+        prism_z(P2, P2F, [(23.83, 39.83), (39.67, 39.83), (39.67, 50.67), (23.83, 50.67)])
+        # one-story garage / mud wing
+        prism_z(0, P1, [(0, 39.83), (22, 39.83), (22, 67.33), (0, 67.33)])
+        # one-story primary suite and hall
+        prism_z(0, P1, [(39.5, 39.83), (59, 39.83), (59, 33.83), (61.5, 33.83), (61.5, 56.17),
+                        (45.5, 56.17), (45.5, 49.17), (39.5, 49.17)])
 
     # ============ ROOF (roof plan, sheet 5) ============
+    setgroup('froof')
     # front block
     slab([(5.33, -3), (52.33, -3), (50.33, -1), (50.33, 6), (7.33, 6), (7.33, -1)], f_front)
     slab([(7.33, 6), (50.33, 6), (50.33, 20.59), (7.33, 20.59)], f_front)
     slab([(5.33, -3), (7.33, -1), (7.33, 11), (5.33, 9)], lambda x, y: EF + (x - 5.33) * S4)
     slab([(52.33, -3), (52.33, 9), (50.33, 11), (50.33, -1)], lambda x, y: EF + (52.33 - x) * S4)
+    setgroup('wroof')
     # left wing + left side skirt
     slab([(-3, 6), (5.33, 6), (5.33, 9), (7.33, 11), (7.33, 15), (-1, 15), (-1, 8)], wing_front)
     slab([(-1, 15), (7.33, 15), (7.33, 25.83), (-1, 25.83)], wing_front)
@@ -181,6 +339,7 @@ def build():
     slab([(59.67, 6), (59.67, 18), (57.67, 19), (57.67, 8)], lambda x, y: E2 + (59.67 - x) * S4)
     slab([(57.67, 19), (59.67, 18), (60.5, 18), (60.5, 29.59), (57.67, 29.59)],
          lambda x, y: E2 + (y - 18) * S8)
+    setgroup('rroof')
     # the full-width rear plane
     slab([(-1, 25.83), (7.33, 25.83), (7.33, 20.59), (50.33, 20.59), (50.33, 25.83),
           (57.67, 25.83), (57.67, 29.59), (60.5, 29.59), (60.5, 41.17), (40.5, 41.17),
@@ -192,6 +351,7 @@ def build():
     slab([(40.5, 39.67), (40.5, 51.67), (31.67, 42.83), (31.67, 30.83)],
          lambda x, y: EF + (40.5 - x) * S8)
     slab([(22.83, 51.67), (31.67, 42.83), (40.5, 51.67)], lambda x, y: EF + (51.67 - y) * S8)
+    setgroup('low')
     # garage hip (10'-1" plate), ridge dies into the main house
     slab([(-1.5, 39.83), (11, 39.83), (11, 56.33), (-1.5, 68.83)], lambda x, y: E1 + (x + 1.5) * S8)
     slab([(-1.5, 68.83), (11, 56.33), (23.5, 68.83)], lambda x, y: E1 + (68.83 - y) * S8)
@@ -211,6 +371,7 @@ def build():
     slab([(39.67, 39.83), (51.42, 39.83), (45.5, 51.67), (39.67, 51.67)],
          lambda x, y: E1 + 1.5 * S8 + (51.67 - y) * S4)
 
+    setgroup('gable')
     # ============ GABLE WALLS (side elevations: three stepped gables each side) ============
     # Gable walls stop just under the roof surface and sit a hair inside the rake,
     # so the roof's own edge reads as the rake trim.
@@ -230,10 +391,12 @@ def build():
     prism_x(59 - g, 59, [(19.5, P2), (19.5, E2 + 1.5 * S8 - dz), (29.59, SMALL_RIDGE - dz),
                          (39.83, rear(0, 39.83) - dz), (39.83, P2)])
 
+    setgroup('rroof')
     # ============ CHIMNEY (brick chimney w/ metal cap) ============
     prism_z(rear(0, 26.4) - 1.0, 37.2, [(44.2, 23.2), (47.0, 23.2), (47.0, 26.4), (44.2, 26.4)])
     prism_z(37.2, 37.6, [(43.95, 22.95), (47.25, 22.95), (47.25, 26.65), (43.95, 26.65)])
 
+    setgroup('froof')
     # ============ ROLL-TOP DORMERS (three, 2040 fixed arch windows) ============
     yf = -0.12
     for xc in (16.33, 28.83, 41.33):
@@ -252,6 +415,7 @@ def build():
             face([(ua, yf - 0.35, za), (ub, yf - 0.35, zb2), (ub, ye, zb2), (ua, ye, za)], 'roof')
         opening('y', yf, xc - 1.0, xc + 1.0, 23 + 1 / 12, 26 + 1 / 12, -1, arch=True)   # sill @ 23'-1"
 
+    setgroup('open')
     # ============ FRONT (sheet 1) ============
     F = -1
     for i, xc in enumerate((16.33, 28.83, 41.33)):
@@ -268,7 +432,7 @@ def build():
     opening('y', 0, 25.33, 32.33, 0.1, 5.5, F, arch=True)
     # recessed wing faces (y = 9)
     for x0 in (2.67, 52.5):
-        opening('y', 9, x0, x0 + 2.0, 3.0, 8.0, F)        # cast stone sill @ 3'-0"
+        opening('y', 9, x0, x0 + 2.0, 3.0, 8.0, F, mat='darkglass' if x0 < 10 else 'glass', tag='wing_l' if x0 < 10 else None)
         opening('y', 9, x0, x0 + 2.0, 16.0, 20.0, F)
 
     # ============ LEFT SIDE (x = 0) ============
@@ -294,6 +458,13 @@ def build():
     opening('y', 67.33, 2.8, 20.6, 0.1, 8.0, R, mat='void')   # 18080 overhead garage door
     opening('x', 22, 54.5, 57.2, 0.1, 8.0, R)           # garage service door
 
+    # ============ PETS (true to life; seen in the last, street-facing view of the intro) ============
+    # Huckleberry (70 lb sheepadoodle) stands side-on just inside the study's arched French door;
+    # the cat (12 lb Russian Blue) sits tall on the sill of the left wing window, darker glass behind her.
+    PET_QUADS['dog'] = dict(o=(41.33 - 1.95, -0.075, FF), U=(3.9, 0, 0), V=(0, 0, 3.9 * 48 / 64), n=(0, -1, 0),
+                            fid=TAGS['door_study'] + 1, sprite='dog')
+    PET_QUADS['cat'] = dict(o=(3.67 - 0.44, 9 - 0.075, 3.0), U=(0.88, 0, 0), V=(0, 0, 1.1), n=(0, -1, 0),
+                            fid=TAGS['wing_l'] + 1, sprite='cat')
     return list(faces)
 
 

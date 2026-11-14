@@ -1,5 +1,10 @@
-/* 515 Cap Rock - tiny self-contained WebGL viewer (no libraries, works offline).
-   Usage: CapRockViewer(containerElement, window.CAPROCK_MODEL, {onFirstTouch}) */
+/* 515 Cap Rock - small self-contained WebGL viewer (no libraries).
+   Usage: CapRockViewer(containerElement, window.OVERCREEK_MODEL, {onFirstTouch}) -> {setView}
+   setView('ext' | 'f1' | 'f2'): the floors above lift straight up out of frame (along the camera's
+   up direction, so nothing ever swings toward the lens) while the camera tilts to look down into
+   that floor; going back, they drop into place. Rotation and zoom keep working in every view.
+   Huckleberry and the cat are textured quads just inside their windows, depth-tested
+   with the house, and animated from window.CAPROCK_PETS. */
 (function () {
   function b64(s) { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new Float32Array(u.buffer); }
   function mat4persp(fov, asp, n, f) { const t = 1 / Math.tan(fov / 2); return [t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]; }
@@ -33,92 +38,111 @@
 
     const pos = b64(model.pos), nrm = b64(model.nrm), col = b64(model.col), lin = b64(model.lines);
     const meshP = prog(gl,
-      'attribute vec3 p;attribute vec3 n;attribute vec3 c;uniform mat4 mvp;uniform mat4 rot;varying vec3 v;' +
+      'attribute vec3 p;attribute vec3 n;attribute vec3 c;uniform mat4 vp;uniform mat4 rot;uniform vec3 off;varying vec3 v;' +
       'void main(){vec3 N=normalize((rot*vec4(n,0.)).xyz);vec3 L=normalize(vec3(-0.45,0.75,0.55));' +
-      'float d=abs(dot(N,L));float sky=0.62+0.18*N.y;vec3 rim=vec3(0.73,0.71,1.0)*0.10*max(0.,dot(N,normalize(vec3(0.6,0.3,-0.7))));' +
-      'v=c*(sky+0.42*d)+rim;gl_Position=mvp*vec4(p,1.);}',
+      'float d=abs(dot(N,L));float sky=0.62+0.18*N.y;vec3 rim=vec3(0.80,0.86,0.80)*0.08*max(0.,dot(N,normalize(vec3(0.6,0.3,-0.7))));' +
+      'v=c*(sky+0.42*d)+rim;gl_Position=vp*(rot*vec4(p,1.)+vec4(off,0.));}',
       'precision mediump float;varying vec3 v;void main(){gl_FragColor=vec4(min(v,vec3(1.)),1.);}');
     const lineP = prog(gl,
-      'attribute vec3 p;uniform mat4 mvp;void main(){gl_Position=mvp*vec4(p,1.);gl_Position.z-=0.0004*gl_Position.w;}',
-      'precision mediump float;void main(){gl_FragColor=vec4(0.17,0.165,0.19,1.);}');
+      'attribute vec3 p;uniform mat4 vp;uniform mat4 rot;uniform vec3 off;void main(){gl_Position=vp*(rot*vec4(p,1.)+vec4(off,0.));gl_Position.z-=0.0004*gl_Position.w;}',
+      'precision mediump float;void main(){gl_FragColor=vec4(0.17,0.18,0.17,1.);}');
     const shP = prog(gl,
-      'attribute vec2 p;uniform mat4 mvp;varying vec2 q;void main(){q=p;gl_Position=mvp*vec4(p.x*14.,0.02,p.y*15.,1.);}',
+      'attribute vec2 p;uniform mat4 mvp;varying vec2 q;void main(){q=p;gl_Position=mvp*vec4(p.x*16.,0.02,p.y*17.,1.);}',
       'precision mediump float;varying vec2 q;void main(){float r=length(q);gl_FragColor=vec4(0.,0.,0.,0.5*smoothstep(1.,0.15,r));}');
+    const spriteP = prog(gl,
+      'attribute vec3 p;attribute vec2 t;uniform mat4 mvp;varying vec2 v;void main(){v=t;gl_Position=mvp*vec4(p,1.);gl_Position.z-=0.0002*gl_Position.w;}',
+      'precision mediump float;uniform sampler2D tex;varying vec2 v;void main(){vec4 c=texture2D(tex,v);if(c.a<0.02)discard;gl_FragColor=c;}');
     const bP = buf(gl, pos), bN = buf(gl, nrm), bC = buf(gl, col), bL = buf(gl, lin);
     const bS = buf(gl, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
-    const nTri = pos.length / 3, nLin = lin.length / 3;
-
-    /* ---- pets: animated sprites (Huckleberry in the dining door, the cat in the Bed 5 window at the back) ---- */
-    const spriteP = prog(gl,
-      'attribute vec3 p;attribute vec2 t;uniform mat4 mvp;varying vec2 v;void main(){v=t;gl_Position=mvp*vec4(p,1.);}',
-      'precision mediump float;uniform sampler2D tex;varying vec2 v;void main(){vec4 c=texture2D(tex,v);if(c.a<0.02)discard;gl_FragColor=c;}');
-    const FT = 0.3048, W3 = (x, y, z) => [(x - 30.0) * FT, z * FT, -(y - 33.0) * FT];
     const bUV = buf(gl, new Float32Array([0, 1, 1, 1, 0, 0, 1, 0]));
-    const pets = { ready: false, dog: null, cat: null };
-    function quadBuf(x0, x1, z0, z1, y) { const a = W3(x0, y, z0), b = W3(x1, y, z0), c = W3(x0, y, z1), d = W3(x1, y, z1); return buf(gl, new Float32Array([...a, ...b, ...c, ...d])); }
-    function makeTex(cv) { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return t; }
-    /* each pet is pre-drawn as a short idle loop; every frame sets a transform on its moving parts */
-    function frames(markup, vb, pxW, pxH, poses) {
-      return Promise.all(poses.map(pose => new Promise(ok => {
-        let m = markup;
-        for (const cls in pose) m = m.replace('<g class="' + cls + '">', '<g class="' + cls + '" transform="' + pose[cls] + '">');
-        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + vb + '" width="' + pxW + '" height="' + pxH + '">' + m + '</svg>';
-        const im = new Image(); im.onload = () => { const cv = document.createElement('canvas'); cv.width = pxW; cv.height = pxH; cv.getContext('2d').drawImage(im, 0, 0, pxW, pxH); ok(makeTex(cv)); };
-        im.onerror = () => ok(null); im.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-      })));
+    const nTri = pos.length / 3, nLin = lin.length / 3;
+    const LAYERS = model.layers || [{ name: 'all', tri: [0, nTri], lin: [0, nLin] }];
+    /* which layers are lifted away in each view (bottom to top: ff gceil sf gallery rail beam roof) */
+    const VIEWS = {
+      ext: { up: [], el: Math.atan2(7.1, 60), ty: 3.9 },
+      f2: { up: LAYERS.slice(LAYERS.findIndex(L => L.name === 'sf') + 1).map(L => L.name), el: 52 * Math.PI / 180, ty: 3.6 },
+      f1: { up: LAYERS.filter(L => L.name !== 'ff').map(L => L.name), el: 56 * Math.PI / 180, ty: 0.9 }
+    };
+    const LIFT = 46, LDUR = 0.8, STAG = 0.07;
+    const lift = LAYERS.map(() => ({ from: 0, to: 0, t0: 0, cur: 0 }));
+    let view = 'ext', el = VIEWS.ext.el, elFrom = el, elTo = el, ty = VIEWS.ext.ty, tyFrom = ty, tyTo = ty, camT0 = 0;
+    const CDUR = 0.9, ease = u => u <= 0 ? 0 : u >= 1 ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * u);
+    function animating() { const now = performance.now() / 1000; return now - camT0 < CDUR || lift.some(l => l.cur !== l.to); }
+    function stepAnim() {
+      const now = performance.now() / 1000;
+      const u = ease((now - camT0) / CDUR); el = elFrom + (elTo - elFrom) * u; ty = tyFrom + (tyTo - tyFrom) * u;
+      for (const l of lift) { const v = (now - l.t0) / LDUR; l.cur = v >= 1 ? l.to : l.from + (l.to - l.from) * ease(v); }
     }
-    const ease = u => 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, Math.min(1, u)));
-    const pulse = (t, a, b, ramp) => ease((t - a) / ramp) * (1 - ease((t - (b - ramp)) / ramp));   // 0 -> 1 -> 0 between a and b
-    const keys = (t, ks) => { let k = 0; while (k < ks.length - 2 && ks[k + 1][0] < t) k++; const [t0, a0] = ks[k], [t1, a1] = ks[k + 1]; return a0 + (a1 - a0) * ease((t - t0) / (t1 - t0)); };
-    if (opts.petsMarkup) {
-      const src = opts.petsMarkup;
-      const dogM = src.slice(src.indexOf('<g class="pet-dog"'), src.indexOf('<!-- cat'));
-      const catM = src.slice(src.indexOf('<g class="pet-cat"'), src.lastIndexOf('</svg>'));
-      // Huckleberry: 3.6 s loop - four tail wags, one slow head tilt, one blink
-      const DN = 36, dogPoses = Array.from({ length: DN }, (_, i) => { const t = i / DN; return {
-        'dog-tail': 'rotate(' + (1 + 15 * Math.sin(t * Math.PI * 8)).toFixed(2) + ' 73 110)',
-        'dog-head': 'rotate(' + (-8 * pulse(t, 0.40, 0.85, 0.12)).toFixed(2) + ' 50 62)',
-        'dog-eyes': (i === 8 ? 'translate(0 728.5) scale(1 0.12) translate(0 -728.5)' : 'scale(1)') }; });
-      // the cat: 4 s loop - tail flick, a look to the side, one blink
-      const CN = 40, catPoses = Array.from({ length: CN }, (_, i) => { const t = i / CN; return {
-        'cat-tail': 'rotate(' + keys(t, [[0, 0], [.35, -16], [.5, -4], [.65, -12], [1, 0]]).toFixed(2) + ' 50 84)',
-        'cat-head': 'rotate(' + (6 * pulse(t, 0.45, 0.8, 0.1)).toFixed(2) + ' 35 45)',
-        'cat-eyes': (i === 30 ? 'translate(0 31) scale(1 0.12) translate(0 -31)' : 'scale(1)') }; });
-      Promise.all([frames(dogM, '0 0 100 132', 400, 528, dogPoses), frames(catM, '0 0 70 92', 280, 368, catPoses)]).then(([d, c]) => {
-        if (d.some(x => !x) || c.some(x => !x)) return;
-        // flat cut-outs stand a few inches clear of the glass so the two never fight over the same depth
-        pets.dog = { tex: d, buf: quadBuf(16.33 - 2.045, 16.33 + 2.045, -0.05, 5.35, -0.35), period: 3600 };   // inside the dining French door
-        pets.cat = { tex: c, buf: quadBuf(32.3 + 1.217, 32.3 - 1.217, 15.3, 18.5, 51.0), period: 4000 };      // Bed 5 window, at the back
-        pets.ready = true; kick();
+    function setView(name) {
+      if (!VIEWS[name] || name === view) return;
+      const V = VIEWS[name], now = performance.now() / 1000; stepAnim();
+      view = name; elFrom = el; elTo = V.el; tyFrom = ty; tyTo = V.ty; camT0 = now;
+      const goingUp = [], goingDown = [];
+      LAYERS.forEach((L, i) => { const to = V.up.includes(L.name) ? LIFT : 0; if (to !== lift[i].to) (to ? goingUp : goingDown).push(i); lift[i].to = to; });
+      goingUp.sort((a, b) => b - a).forEach((i, k) => { lift[i].from = lift[i].cur; lift[i].t0 = now + k * STAG; });          // top layer leaves first
+      goingDown.sort((a, b) => a - b).forEach((i, k) => { lift[i].from = lift[i].cur; lift[i].t0 = now + 0.12 + k * STAG; }); // lowest lands first
+      zoomTo = 1; oxTo = 0; oyTo = 0; updBtns(); kick();
+    }
+
+    /* ---- pets: frames of the idle animation rendered once into textures ---- */
+    const PETS = window.CAPROCK_PETS;
+    const pets = { ready: false, list: [] };
+    function makeTex(cv) { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return t; }
+    function frameTex(key, t, pxW, pxH) {
+      return new Promise(ok => {
+        const P = PETS[key];
+        const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + P.w + ' ' + P.h + '" width="' + pxW + '" height="' + pxH + '">' + PETS.render(key, t) + '</svg>';
+        const im = new Image();
+        im.onload = () => { const cv = document.createElement('canvas'); cv.width = pxW; cv.height = pxH; cv.getContext('2d').drawImage(im, 0, 0, pxW, pxH); ok(makeTex(cv)); };
+        im.onerror = () => ok(null);
+        im.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
       });
     }
-    function drawPets(vp, R) {
+    if (PETS && model.pets) {
+      const FPS = 10;
+      const specs = [['dog', 240, 160], ['cat', 168, 216]];   // texture size
+      Promise.all(specs.map(([key, w, h]) => {
+        const n = Math.round(PETS[key].loop * FPS);
+        return Promise.all(Array.from({ length: n }, (_, i) => frameTex(key, i / FPS, w, h))).then(tex => {
+          const q = model.pets[key];
+          return { key, tex, fps: FPS, buf: buf(gl, new Float32Array([...q.bl, ...q.br, ...q.tl, ...q.tr])) };
+        });
+      })).then(list => {
+        if (list.some(p => p.tex.some(x => !x))) return;
+        pets.list = list; pets.ready = true; kick();
+      });
+    }
+    function drawPets(mvp) {
       if (!pets.ready) return;
-      const now = performance.now();
+      const now = performance.now() / 1000;
       gl.useProgram(spriteP); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      const tl = gl.getAttribLocation(spriteP, 't'); gl.bindBuffer(gl.ARRAY_BUFFER, bUV); gl.enableVertexAttribArray(tl); gl.vertexAttribPointer(tl, 2, gl.FLOAT, false, 0, 0);
-      gl.uniformMatrix4fv(gl.getUniformLocation(spriteP, 'mvp'), false, mul(vp, R));
+      gl.uniformMatrix4fv(gl.getUniformLocation(spriteP, 'mvp'), false, mvp);
+      const tl = attr(spriteP, 't', bUV, 2);
       let pl = -1;
-      for (const p of [pets.dog, pets.cat]) {
-        gl.bindTexture(gl.TEXTURE_2D, p.tex[Math.floor(now / p.period * p.tex.length) % p.tex.length]);
+      for (const p of pets.list) {
+        gl.bindTexture(gl.TEXTURE_2D, p.tex[Math.floor(now * p.fps) % p.tex.length]);
         pl = attr(spriteP, 'p', p.buf, 3); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
-      gl.disableVertexAttribArray(pl); gl.disableVertexAttribArray(tl); gl.disable(gl.BLEND);
+      if (pl >= 0) gl.disableVertexAttribArray(pl);
+      gl.disableVertexAttribArray(tl); gl.disable(gl.BLEND);
     }
 
     let angle = 0, vel = 0, auto = true, dragging = false, lastX = 0, lastT = 0, visible = true, raf = 0;
     /* zoom: k = 1 shows the whole house; smaller k moves the camera closer. ox/oy pan the camera
        sideways/up so the spot you tapped stays under your finger while you zoom in. */
     let zoom = 1, zoomTo = 1, ox = 0, oy = 0, oxTo = 0, oyTo = 0, fovY = 30 * Math.PI / 180, aspNow = 1;
-    const ZMIN = 0.28, ZMAX = 1.15, TY = 3.9, DY = 7.1, DZ = 60, DL = Math.hypot(DY, DZ), UY = DZ / DL, UZ = -DY / DL;
-    function viewMat() { const k = zoom, tx = ox, ty = TY + oy * UY, tz = oy * UZ; return lookAt([tx, ty + DY * k, tz + DZ * k], [tx, ty, tz], [0, 1, 0]); }
+    const ZMIN = 0.28, ZMAX = 1.15, DL = Math.hypot(7.1, 60);
+    function camUp() { return [0, Math.cos(el), -Math.sin(el)]; }
+    function viewMat() { const k = zoom, U = camUp(), tx = ox, cy = ty + oy * U[1], tz = oy * U[2];
+      return lookAt([tx, cy + DL * Math.sin(el) * k, tz + DL * Math.cos(el) * k], [tx, cy, tz], [0, 1, 0]); }
     const halfH = k => DL * k * Math.tan(fovY / 2);
     function clampPan(k) {
       if (k >= 1 - 1e-3) { oxTo = 0; oyTo = 0; return; }
       const hh = halfH(k), hw = hh * aspNow;
       // keep the aim point on the house: within its width, no lower than the doorsills, no higher than the ridge
-      const mx = Math.max(0, 12 - 0.5 * hw); oxTo = Math.max(-mx, Math.min(mx, oxTo));
-      oyTo = Math.max(0.6 - TY, Math.min(Math.max(0.6 - TY, 11.5 - TY - 0.5 * hh), oyTo));
+      const mx = Math.max(0, 10 - 0.5 * hw); oxTo = Math.max(-mx, Math.min(mx, oxTo));
+      if (view === 'ext') oyTo = Math.max(0.6 - ty, Math.min(Math.max(0.6 - ty, 10.5 - ty - 0.5 * hh), oyTo));
+      else { const my = Math.max(0, 11 - 0.5 * hh); oyTo = Math.max(-my, Math.min(my, oyTo)); }
     }
     function zoomAt(z, nx, ny) {                                       // nx, ny: -1..1 across the canvas
       const k0 = zoomTo, k1 = Math.max(ZMIN, Math.min(ZMAX, z)), f = 1 - k1 / k0, hh = halfH(k0);
@@ -139,7 +163,8 @@
       const R = rotY(angle);
       zoom += (zoomTo - zoom) * 0.2; ox += (oxTo - ox) * 0.2; oy += (oyTo - oy) * 0.2;
       if (Math.abs(zoomTo - zoom) < 1e-4 && Math.abs(oxTo - ox) < 1e-3 && Math.abs(oyTo - oy) < 1e-3) { zoom = zoomTo; ox = oxTo; oy = oyTo; }
-      const vp = mul(proj, viewMat()), mvp = mul(vp, R);
+      stepAnim();
+      const vp = mul(proj, viewMat()), mvp = mul(vp, R), U = camUp();
       gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       // ground shadow (rotates with the house)
       gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -148,21 +173,29 @@
       gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST);
       // house
       gl.useProgram(meshP);
-      gl.uniformMatrix4fv(gl.getUniformLocation(meshP, 'mvp'), false, mvp);
+      gl.uniformMatrix4fv(gl.getUniformLocation(meshP, 'vp'), false, vp);
       gl.uniformMatrix4fv(gl.getUniformLocation(meshP, 'rot'), false, R);
+      const uOffM = gl.getUniformLocation(meshP, 'off');
       const a1 = attr(meshP, 'p', bP, 3), a2 = attr(meshP, 'n', bN, 3), a3 = attr(meshP, 'c', bC, 3);
-      gl.drawArrays(gl.TRIANGLES, 0, nTri);
+      LAYERS.forEach((L, i) => { const h = lift[i].cur; if (h >= LIFT - 1e-3) return;
+        gl.uniform3f(uOffM, U[0] * h, U[1] * h, U[2] * h); gl.drawArrays(gl.TRIANGLES, L.tri[0], L.tri[1]); });
       gl.disableVertexAttribArray(a2); gl.disableVertexAttribArray(a3); gl.disableVertexAttribArray(a1);
       // outlines
-      gl.useProgram(lineP); gl.uniformMatrix4fv(gl.getUniformLocation(lineP, 'mvp'), false, mvp);
-      const a4 = attr(lineP, 'p', bL, 3); gl.drawArrays(gl.LINES, 0, nLin); gl.disableVertexAttribArray(a4);
-      drawPets(vp, R);
+      gl.useProgram(lineP);
+      gl.uniformMatrix4fv(gl.getUniformLocation(lineP, 'vp'), false, vp);
+      gl.uniformMatrix4fv(gl.getUniformLocation(lineP, 'rot'), false, R);
+      const uOffL = gl.getUniformLocation(lineP, 'off');
+      const a4 = attr(lineP, 'p', bL, 3);
+      LAYERS.forEach((L, i) => { const h = lift[i].cur; if (h >= LIFT - 1e-3) return;
+        gl.uniform3f(uOffL, U[0] * h, U[1] * h, U[2] * h); gl.drawArrays(gl.LINES, L.lin[0], L.lin[1]); });
+      gl.disableVertexAttribArray(a4);
+      drawPets(mvp);
     }
     function tick() {
       raf = 0;
       if (!dragging) { if (auto) angle += 0.0017; else { angle += vel; vel *= 0.94; if (Math.abs(vel) < 1e-5) vel = 0; } }
       draw();
-      if (visible && (auto || dragging || vel || pets.ready || zoom !== zoomTo || ox !== oxTo || oy !== oyTo)) raf = requestAnimationFrame(tick);
+      if (visible && (auto || dragging || vel || pets.ready || animating() || zoom !== zoomTo || ox !== oxTo || oy !== oyTo)) raf = requestAnimationFrame(tick);
     }
     function kick() { if (!raf && visible) raf = requestAnimationFrame(tick); }
 
@@ -205,7 +238,7 @@
       const bar = document.createElement('div');
       bar.style.cssText = 'position:absolute;right:max(14px,env(safe-area-inset-right,0px));bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:2';
       const mk = (label, txt, dz) => { const b = document.createElement('button'); b.type = 'button'; b.setAttribute('aria-label', label); b.textContent = txt;
-        b.style.cssText = 'width:44px;height:44px;border-radius:50%;border:1px solid rgba(245,239,232,.28);background:rgba(24,18,20,.55);color:#f5efe8;font:300 22px/1 Geist,system-ui,sans-serif;cursor:pointer;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)';
+        b.style.cssText = 'width:44px;height:44px;border-radius:50%;border:1px solid rgba(245,239,232,.28);background:rgba(24,18,20,.55);color:#f5efe8;font:300 22px/1 "Instrument Sans",system-ui,sans-serif;cursor:pointer;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)';
         b.addEventListener('click', () => { firstTouch(); zoomAt(dz > 1 && zoomTo * dz >= 0.97 ? 1 : zoomTo * dz, 0, 0); }); bar.appendChild(b); return b; };
       const inBtn = mk('Zoom in', '+', 0.65), outBtn = mk('Zoom out', '−', 1 / 0.65);
       if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
@@ -214,6 +247,6 @@
     new IntersectionObserver(([en]) => { visible = en.isIntersecting; if (visible) kick(); }).observe(host);
     addEventListener('resize', () => { draw(); });
     draw(); kick();
-    return { canvas };
+    return { canvas, setView };
   };
 })();
